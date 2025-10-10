@@ -14,8 +14,12 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 )
 
 type Blueprint struct {
@@ -32,19 +36,61 @@ type Database struct {
 	Blueprints []Blueprint `json:"blueprints"`
 }
 
-func Load(path string) (Database, error) {
+// Load reads registry.json from a local path or an HTTP(S) URL.
+func Load(location string) (Database, error) {
 	var db Database
-	b, err := os.ReadFile(path)
+	var data []byte
+	var err error
+
+	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
+		data, err = fetch(location)
+	} else {
+		data, err = os.ReadFile(location)
+	}
 	if err != nil {
 		return db, err
 	}
-	if err := json.Unmarshal(b, &db); err != nil {
+	if err := json.Unmarshal(data, &db); err != nil {
 		return db, err
+	}
+	if db.Blueprints == nil {
+		db.Blueprints = []Blueprint{}
+	}
+	for i := range db.Blueprints {
+		if db.Blueprints[i].Tags == nil {
+			db.Blueprints[i].Tags = []string{}
+		}
 	}
 	return db, nil
 }
 
+func fetch(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GET %s: %d: %s", url, resp.StatusCode, string(b))
+	}
+	return io.ReadAll(resp.Body)
+}
+
 func Save(path string, db Database) error {
+	if db.Blueprints == nil {
+		db.Blueprints = []Blueprint{}
+	}
+	for i := range db.Blueprints {
+		if db.Blueprints[i].Tags == nil {
+			db.Blueprints[i].Tags = []string{}
+		}
+	}
 	b, err := json.MarshalIndent(db, "", "  ")
 	if err != nil {
 		return err
@@ -58,5 +104,5 @@ func Find(db Database, name string) (*Blueprint, error) {
 			return &db.Blueprints[i], nil
 		}
 	}
-	return nil, fmt.Errorf("blueprint %q not found", name)
+	return nil, errors.New("blueprint not found: " + name)
 }
