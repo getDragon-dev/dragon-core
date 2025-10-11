@@ -13,46 +13,80 @@
 package templates
 
 import (
+	"bytes"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
+
+	sprig "github.com/Masterminds/sprig/v3"
 )
 
 type Context map[string]any
 
-// RenderDir processes *.tmpl files in srcDir into dstDir using the context.
-func RenderDir(srcDir, dstDir string, ctx Context) error {
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+// RenderDir parses all files under src, applies text/template with Sprig funcs, writes to dst.
+func RenderDir(src, dst string, ctx Context) error {
+	// collect template files
+	var files []string
+	if err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(srcDir, path)
-		out := filepath.Join(dstDir, strings.TrimSuffix(rel, ".tmpl"))
-		if info.IsDir() {
-			return os.MkdirAll(out, 0o755)
+		if d.IsDir() {
+			return nil
 		}
-		if strings.HasSuffix(path, ".tmpl") {
-			b, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			t, err := template.New(rel).Parse(string(b))
-			if err != nil {
-				return err
-			}
-			f, err := os.Create(out)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			return t.Execute(f, ctx)
-		}
-		// copy non-template files as-is
-		b, err := os.ReadFile(path)
+		files = append(files, p)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// parse with Sprig
+	t := template.New("").Funcs(sprig.TxtFuncMap())
+	for _, f := range files {
+		rel, _ := filepath.Rel(src, f)
+		b, err := os.ReadFile(f)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(out, b, 0o644)
-	})
+		if _, err := t.New(rel).Parse(string(b)); err != nil {
+			return err
+		}
+	}
+
+	// execute each template into target tree (strip .tmpl suffix)
+	for _, f := range files {
+		rel, _ := filepath.Rel(src, f)
+		outRel := rel
+		if filepath.Ext(outRel) == ".tmpl" {
+			outRel = outRel[:len(outRel)-len(".tmpl")]
+		}
+
+		// render path (use same Sprig funcs)
+		pathTmpl, err := template.New("path").Funcs(sprig.TxtFuncMap()).Parse(outRel)
+		if err != nil {
+			return err
+		}
+		var pathBuf bytes.Buffer
+		if err := pathTmpl.Execute(&pathBuf, ctx); err != nil {
+			return fmt.Errorf("render path %s: %w", outRel, err)
+		}
+		outRel = pathBuf.String()
+
+		// render file content
+		var buf bytes.Buffer
+		if err := t.ExecuteTemplate(&buf, rel, ctx); err != nil {
+			return err
+		}
+		outPath := filepath.Join(dst, outRel)
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
