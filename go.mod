@@ -1,6 +1,6 @@
 module github.com/getDragon-dev/dragon-core
 
-go 1.26.7
+go 1.27.0
 
 require github.com/Masterminds/sprig/v3 v3.3.0
 
